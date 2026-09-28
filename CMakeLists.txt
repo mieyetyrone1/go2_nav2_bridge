@@ -21,6 +21,8 @@ find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(unitree_go REQUIRED)
 find_package(unitree_api REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -47,15 +49,15 @@ target_include_directories(nav2_bridge_node PUBLIC
 )
 
 
-ament_target_dependencies(nav2_bridge_node rclcpp geometry_msgs unitree_api)
+ament_target_dependencies(nav2_bridge_node rclcpp geometry_msgs unitree_api nav_msgs tf2_ros)
 
 install(TARGETS
   nav2_bridge_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install the launch directory into the global workspace share path
-install(DIRECTORY launch
+# Install the launch and config directories into the global workspace share path
+install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
 

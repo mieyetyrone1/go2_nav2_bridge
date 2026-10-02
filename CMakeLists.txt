@@ -76,5 +76,10 @@ install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/yolo_bytetrack_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
 

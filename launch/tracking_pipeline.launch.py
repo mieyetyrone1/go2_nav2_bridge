@@ -28,9 +28,19 @@ def generate_launch_description():
         output='screen'
     )
 
+    # YOLO-World + ByteTrack Python Vision Inference Node
+    yolo_bytetrack_node = Node(
+        package='go2_nav2_bridge',
+        executable='yolo_bytetrack_node.py',
+        name='yolo_bytetrack_processor',
+        output='screen'
+    )
+
+
     return LaunchDescription([
         static_tf_structural,
         static_tf_optical,
-        target_projector_node
+        target_projector_node,
+        yolo_bytetrack_node
     ])
 

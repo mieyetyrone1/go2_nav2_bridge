@@ -8,7 +8,7 @@ import numpy as np
 class MockTrackerNode(Node):
     def __init__(self):
         super().__init__('mock_tracker_node')
-        self.bbox_pub = self.create_publisher(PolygonStamped, '/tracker/bbox', 10)
+        self.bbox_pub = self.create_publisher(PolygonStamped, '/tracker/tracked_target', 10)
         self.depth_pub = self.create_publisher(Image, '/camera/depth/image_rect_raw', 10)
         self.info_pub = self.create_publisher(CameraInfo, '/camera/depth/camera_info', 10)
         self.timer = self.create_timer(0.1, self.timer_callback)

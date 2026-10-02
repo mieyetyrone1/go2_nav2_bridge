@@ -30,7 +30,7 @@ public:
             "/camera/depth/camera_info", 10,
             std::bind(&TargetProjectorNode::infoCallback, this, std::placeholders::_1));
 
-        bbox_sub_.subscribe(this, "/tracker/bbox");
+        bbox_sub_.subscribe(this, "/tracker/tracked_target");
         depth_sub_.subscribe(this, "/camera/depth/image_rect_raw"); // RealSense convention topic
 
         sync_ = std::make_unique<message_filters::Synchronizer<SyncPolicy>>(
@@ -99,7 +99,7 @@ private:
 
         geometry_msgs::msg::PointStamped odom_point;
         try {
-            odom_point = tf_buffer_->transform(camera_point, "odom");
+            odom_point = tf_buffer_->transform(camera_point, "map");
         }
         catch (tf2::TransformException &ex) {
             RCLCPP_ERROR(this->get_logger(), "Transform execution failed: %s", ex.what());
@@ -108,7 +108,7 @@ private:
 
         geometry_msgs::msg::PoseStamped nav_goal;
         nav_goal.header.stamp = depth_msg->header.stamp;
-        nav_goal.header.frame_id = "odom"; 
+        nav_goal.header.frame_id = "map"; 
         nav_goal.pose.position = odom_point.point;
         nav_goal.pose.orientation.w = 1.0; 
 

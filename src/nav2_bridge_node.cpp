@@ -23,10 +23,10 @@ public:
 
         twist_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
             "/cmd_vel", 10, std::bind(&Go2Nav2Bridge::twistCallback, this, std::placeholders::_1));
-
+            
         auto hardware_qos = rclcpp::QoS(rclcpp::KeepLast(10));
-        hardware_qos.reliable();                            
-        hardware_qos.durability(RMW_QOS_POLICY_DURABILITY_VOLATILE); 
+        hardware_qos.reliable();
+        hardware_qos.durability(RMW_QOS_POLICY_DURABILITY_VOLATILE);
 
         odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
             "/utlidar/robot_odom", hardware_qos, std::bind(&Go2Nav2Bridge::odomCallback, this, std::placeholders::_1));
@@ -45,7 +45,7 @@ public:
         
         time_offset_calculated_ = false;
         time_offset_seconds_ = 0.0;
-        
+
         RCLCPP_INFO(this->get_logger(), "Go2 Nav2 Velocity Diagnostic Bridge Active!");
     }
 
@@ -85,7 +85,7 @@ private:
         auto corrected_stamp = live_jetson_time;
 
         geometry_msgs::msg::TransformStamped odom_tf;
-        odom_tf.header.stamp = corrected_stamp;
+        odom_tf.header.stamp = hardware_time;
         odom_tf.header.frame_id = "odom";
         odom_tf.child_frame_id = "base_link";
         odom_tf.transform.translation.x = msg->pose.pose.position.x;
@@ -94,7 +94,7 @@ private:
         odom_tf.transform.rotation = msg->pose.pose.orientation;
         tf_broadcaster_->sendTransform(odom_tf);
     }
-
+    
     /**
      * @brief Downsamples 3D PointCloud2 data into a flat 2D LaserScan projection.
      * 

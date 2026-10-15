@@ -21,29 +21,38 @@ public:
     TargetProjectorNode() : Node("target_projector_node")
     {
         goal_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/goal_pose", 10);
-
+        
         tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
-
-        // Subscribe to RealSense calibration parameters stream
+        
         info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
             "/camera/depth/camera_info", 10,
             std::bind(&TargetProjectorNode::infoCallback, this, std::placeholders::_1));
-
+        
         bbox_sub_.subscribe(this, "/tracker/tracked_target");
-        depth_sub_.subscribe(this, "/camera/depth/image_rect_raw"); // RealSense convention topic
-
+        depth_sub_.subscribe(this, "/camera/depth/image_rect_raw");
+        
         sync_ = std::make_unique<message_filters::Synchronizer<SyncPolicy>>(
             SyncPolicy(10), bbox_sub_, depth_sub_);
-            
-        sync_->registerCallback(std::bind(&TargetProjectorNode::synchronizedCallback, 
-            this, std::placeholders::_1, std::placeholders::_2));
 
+        sync_->registerCallback(std::bind(&TargetProjectorNode::synchronizedCallback,
+            this, std::placeholders::_1, std::placeholders::_2));
+        
         has_calibration_ = false;
+        goal_sent_ = false; // Initialize the safety latch variable
         RCLCPP_INFO(this->get_logger(), "C++ Dynamic Target Projector Node Initialized!");
     }
 
 private:
+    /**
+     * @brief Parses and extracts intrinsic camera calibration matrices.
+     * 
+     * Listens to the projection metadata stream to capture horizontal and vertical
+     * focal lengths alongside principal point configurations necessary to perform 
+     * precise 2D-to-3D optical matrix calculations.
+     * 
+     * @param msg Shared pointer to the incoming sensor_msgs::msg::CameraInfo stream.
+     */
     void infoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
     {
         if (!has_calibration_) {
@@ -57,10 +66,25 @@ private:
         }
     }
 
+    /**
+     * @brief Synchronizes object tracking bounding boxes with raw depth image matrices.
+     * 
+     * Extracts target bounding coordinates via exact time matching, samples focal center point
+     * depth values (uint16_t millimeters), and constructs ray-traced spatial point vectors. 
+     * Coordinates are converted directly into the 'odom' spatial frame and broadcast to Nav2.
+     * 
+     * @param bbox_msg Time-synchronized polygon representing tracking boundary corners.
+     * @param depth_msg Time-synchronized raw rectified optical depth register packet.
+     */
     void synchronizedCallback(
         const geometry_msgs::msg::PolygonStamped::ConstSharedPtr bbox_msg,
         const sensor_msgs::msg::Image::ConstSharedPtr depth_msg)
     {
+        // Latch Check: If we already locked onto the target once, stop flooding Nav2
+        if (goal_sent_) {
+        return;
+        }
+
         if (!has_calibration_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Waiting for initial CameraInfo metadata stream...");
             return;
@@ -99,7 +123,8 @@ private:
 
         geometry_msgs::msg::PointStamped odom_point;
         try {
-            odom_point = tf_buffer_->transform(camera_point, "map");
+            // Changed target tracking lookup from map to odom frame
+            odom_point = tf_buffer_->transform(camera_point, "odom");
         }
         catch (tf2::TransformException &ex) {
             RCLCPP_ERROR(this->get_logger(), "Transform execution failed: %s", ex.what());
@@ -108,11 +133,13 @@ private:
 
         geometry_msgs::msg::PoseStamped nav_goal;
         nav_goal.header.stamp = depth_msg->header.stamp;
-        nav_goal.header.frame_id = "map"; 
+        nav_goal.header.frame_id = "odom"; // Locked tracking reference to stable odom space 
         nav_goal.pose.position = odom_point.point;
         nav_goal.pose.orientation.w = 1.0; 
 
+        RCLCPP_INFO(this->get_logger(), "[TARGET ACQUIRED] Locking static Odom target at X: %f, Y: %f", odom_point.point.x, odom_point.point.y);
         goal_pub_->publish(nav_goal);
+        goal_sent_ = true; // Lock the latch so the robot walks smoothly to this specific coordinate spot
     }
 
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
@@ -128,6 +155,7 @@ private:
 
     double fx_, fy_, cx_, cy_;
     bool has_calibration_;
+    bool goal_sent_; // Latch state declaration
 };
 
 int main(int argc, char * argv[])

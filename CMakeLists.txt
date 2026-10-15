@@ -44,6 +44,7 @@ target_include_directories(nav2_bridge_node PUBLIC
 
 ament_target_dependencies(nav2_bridge_node 
   rclcpp 
+  sensor_msgs
   geometry_msgs 
   unitree_go 
   unitree_api 
@@ -74,6 +75,11 @@ install(TARGETS
 
 install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(PROGRAMS
+  scripts/yolo_bytetrack_node.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_package()

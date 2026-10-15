@@ -1,20 +1,7 @@
-amcl:
-  ros__parameters:
-    use_sim_time: false
-    alpha1: 0.2
-    alpha2: 0.2
-    alpha3: 0.2
-    alpha4: 0.2
-    alpha5: 0.2
-    base_frame_id: "base_link"
-    global_frame_id: "map"
-    odom_frame_id: "odom"
-    scan_topic: "scan"
-
 bt_navigator:
   ros__parameters:
     use_sim_time: false
-    global_frame: map
+    global_frame: odom
     robot_base_frame: base_link
     odom_frame: odom
     default_bt_xml_filename: "/home/unitree/go2_nav2_ws/install/go2_nav2_bridge/share/go2_nav2_bridge/config/foxy_nav_tree.xml"
@@ -45,21 +32,25 @@ controller_server:
   ros__parameters:
     use_sim_time: false
     controller_plugins: ["FollowPath"]
+    
+    # Regulated Pure Pursuit Local Planner Configuration
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
-      max_vel_x: 0.5   # Cap the safe walking speed of the quadruped
-      min_vel_x: -0.1
-      max_vel_y: 0.2
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.25    # Safe, predictable base test speed
+      max_vel_x: 0.4
+      max_vel_y: 0.0              # Lateral movement locked out for forward testing
       max_vel_theta: 0.5
-      acc_lim_x: 1.0
-      acc_lim_y: 1.0
-      acc_lim_theta: 1.0
-      decel_lim_x: -1.0
-      decel_lim_y: -1.0
-      decel_lim_theta: -1.0
-      xy_goal_tolerance: 0.15
-      yaw_goal_tolerance: 0.15
-      transform_tolerance: 0.2
+      lookahead_dist: 0.6         # Look 60 cm ahead of the path line
+      min_lookahead_dist: 0.3
+      max_lookahead_dist: 0.9
+      lookahead_time: 1.5
+      
+      # Controller Scaling Bypasses for Direct Vector Tracking
+      use_velocity_scaled_lookahead_dist: false
+      use_regulated_linear_velocity_scaling: false
+      use_cost_regulated_linear_velocity_scaling: false
+      use_approach_vel_scaling: false
+      max_allowed_time_to_collision_after_limit: 10.0
 
 local_costmap:
   local_costmap:
@@ -73,8 +64,9 @@ local_costmap:
       width: 4
       height: 4
       resolution: 0.05
+      footprint: "[ [0.35, 0.20], [0.35, -0.20], [-0.35, -0.20], [-0.35, 0.20] ]"
       plugins: ["obstacle_layer", "inflation_layer"]
-      odom_topic: /utlidar/robot_odom
+
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -85,7 +77,8 @@ local_costmap:
           min_obstacle_height: 0.05
           clearing: true
           marking: true
-          data_type: "PointCloud2"
+          data_type: "LaserScan"
+      
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 0.4
@@ -96,14 +89,18 @@ global_costmap:
     ros__parameters:
       update_frequency: 1.0
       publish_frequency: 1.0
-      global_frame: map
+      global_frame: odom
       robot_base_frame: base_link
       use_sim_time: false
-      rolling_window: false
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: true
+      always_send_full_costmap: true
+      rolling_window: true # Dynamically moves coordinate system boundary with the robot
+      width: 10
+      height: 10
+      track_unknown_space: true
+      resolution: 0.05
+      footprint: "[ [0.35, 0.20], [0.35, -0.20], [-0.35, -0.20], [-0.35, 0.20] ]"
+      plugins: ["obstacle_layer", "inflation_layer"]
+
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -114,9 +111,21 @@ global_costmap:
           min_obstacle_height: 0.05
           clearing: true
           marking: true
-          data_type: "PointCloud2"
+          data_type: "LaserScan"
+      
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         inflation_radius: 0.5
         cost_scaling_factor: 3.0
 
+planner_server:
+  ros__parameters:
+    expected_planner_plugins: ["GridBased"]
+    use_sim_time: false
+    
+    # NavFn Straight-Line Global Planner Configuration
+    GridBased:
+      plugin: "nav2_navfn_planner/NavfnPlanner"
+      tolerance: 0.5
+      use_astar: false
+      allow_unknown: true  # Computes direct pathways over uncharted local costmaps

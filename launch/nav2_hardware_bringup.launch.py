@@ -8,29 +8,17 @@ from launch_ros.actions import Node
 def generate_launch_description():
     pkg_bridge = get_package_share_directory('go2_nav2_bridge')
     nav2_bringup_dir = get_package_share_directory('nav2_bringup')
-    params_file = '/home/unitree/go2_nav2_ws/src/go2_nav2_bridge/config/nav2_params.yaml'
-    # params_file = os.path.join(pkg_bridge, 'config', 'nav2_params.yaml')
+    params_file = os.path.join(pkg_bridge, 'config', 'nav2_params.yaml')
 
-    # 1. RESTORE: Remove the prefix line so it initializes cleanly as a standard process
+    # 1. Custom Unified Movement & Transform Bridge
     nav2_bridge_node = Node(
         package='go2_nav2_bridge',
         executable='nav2_bridge_node',
-        output='screen',
-        parameters=[{
-            'use_sim_time': False,
-            'transform_tolerance': 0.5
-        }]
-    )
-
-    # 2. Static Transform Publisher (base_link to utlidar_lidar)
-    static_tf_node = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        arguments=['0.25', '0.0', '0.15', '0', '0', '0', 'base_link', 'utlidar_lidar'],
+        name='go2_nav2_bridge',
         output='screen'
     )
 
-    # 3. Nav2 Stack Launch Core
+    # 2. Nav2 Stack Launch Core
     nav2_stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(nav2_bringup_dir, 'launch', 'navigation_launch.py')),
         launch_arguments={
@@ -42,7 +30,6 @@ def generate_launch_description():
 
     return LaunchDescription([
         nav2_bridge_node,
-        static_tf_node,
         nav2_stack
     ])
 

@@ -9,11 +9,11 @@ from launch_ros.actions import Node
 def generate_launch_description():
     # External package directory for Nav2 core tracking logic
     nav2_bringup_dir = get_package_share_directory('nav2_bringup')
-
+    
     # Absolute path directly to src/ allows instant parameter adjustments without rebuilding
     params_file = '/home/unitree/go2_nav2_ws/src/go2_nav2_bridge/config/nav2_params.yaml'
 
-    # Create a configurable runtime argument (defaults to INFO for production)
+    # Create a configurable runtime argument (defaults to INFO for visible diagnostic tracking)
     log_level_arg = DeclareLaunchArgument(
         'log_level',
         default_value='info',
@@ -30,8 +30,7 @@ def generate_launch_description():
             'use_sim_time': False,
             'transform_tolerance': 0.5
         }],
-
-        # Dynamically bind the runtime arguments here
+        # Dynamically binds the logging runtime argument directly to the node process execution
         arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')]
     )
 

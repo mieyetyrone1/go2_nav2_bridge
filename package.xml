@@ -3,8 +3,8 @@
 <package format="3">
   <name>go2_nav2_bridge</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="unitree@todo.todo">unitree</maintainer>
+  <description>An autonomous, open-vocabulary Vision-Language-Action (VLA) pipeline for the Unitree Go2 EDU quadruped. Structurally decouples the heavy LLM intent reasoning layer from the deterministic real-time tracking loop, optimizing local GPU VRAM footprints and enabling low-latency physical navigation on the NVIDIA Jetson Orin NX.</description>
+  <maintainer email="mombe@hawk.illinoistech.edu">unitree</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

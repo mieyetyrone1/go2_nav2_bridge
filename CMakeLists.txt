@@ -44,6 +44,7 @@ target_include_directories(nav2_bridge_node PUBLIC
 
 ament_target_dependencies(nav2_bridge_node 
   rclcpp 
+  sensor_msgs
   geometry_msgs 
   unitree_go 
   unitree_api 

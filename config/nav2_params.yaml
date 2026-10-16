@@ -1,7 +1,7 @@
 bt_navigator:
   ros__parameters:
     use_sim_time: false
-    global_frame: odom # map
+    global_frame: odom
     robot_base_frame: base_link
     odom_frame: odom
     default_bt_xml_filename: "/home/unitree/go2_nav2_ws/install/go2_nav2_bridge/share/go2_nav2_bridge/config/foxy_nav_tree.xml"
@@ -33,36 +33,28 @@ controller_server:
     use_sim_time: false
     controller_plugins: ["FollowPath"]
     
-    # Configure the Local Planner to use the RPP Plugin
+    # Regulated Pure Pursuit Local Planner Configuration
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      
-      # Base Velocity constraints
-      desired_linear_vel: 0.25    # Keep it at a safe, predictable test speed
+      desired_linear_vel: 0.25    # Safe, predictable base test speed
       max_vel_x: 0.4
-      max_vel_y: 0.0              # Keep lateral movement locked out for this raw test
+      max_vel_y: 0.0              # Lateral movement locked out for forward testing
       max_vel_theta: 0.5
-      
-      # Lookahead Distance parameters
       lookahead_dist: 0.6         # Look 60 cm ahead of the path line
       min_lookahead_dist: 0.3
       max_lookahead_dist: 0.9
       lookahead_time: 1.5
       
-      # --- THE PURE PURSUIT CONTROLLER BYPASSES ---
-      # Explicitly turn off all regulatory mathematics to force forward movement
+      # Controller Scaling Bypasses for Direct Vector Tracking
       use_velocity_scaled_lookahead_dist: false
       use_regulated_linear_velocity_scaling: false
       use_cost_regulated_linear_velocity_scaling: false
       use_approach_vel_scaling: false
-      
-      # Safety overrides to prevent mathematical panic flags
       max_allowed_time_to_collision_after_limit: 10.0
 
 local_costmap:
   local_costmap:
     ros__parameters:
-      # footprint: "[ [0.35, 0.20], [0.35, -0.20], [-0.35, -0.20], [-0.35, 0.20] ]"
       update_frequency: 5.0
       publish_frequency: 2.0
       global_frame: odom
@@ -72,15 +64,23 @@ local_costmap:
       width: 3
       height: 3
       resolution: 0.05
-      plugins: ["obstacle_layer", "inflation_layer"]
       footprint: "[ [0.35, 0.20], [0.35, -0.20], [-0.35, -0.20], [-0.35, 0.20] ]"
+      plugins: ["obstacle_layer", "inflation_layer"]
+
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: scan
+        observation_sources: scan camera_scan
         scan:
           topic: /scan
           max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+        camera_scan:
+          topic: /camera_scan
+          max_obstacle_height: 1.0
           min_obstacle_height: 0.05
           clearing: true
           marking: true
@@ -93,31 +93,34 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      # footprint: "[ [0.35, 0.20], [0.35, -0.20], [-0.35, -0.20], [-0.35, 0.20] ]"
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: odom # map
       robot_base_frame: base_link
       use_sim_time: false
       always_send_full_costmap: true
-      rolling_window: true # Forces map expansion dynamically
+      rolling_window: true # Dynamically moves coordinate system boundary with the robot
       width: 10
       height: 10
-      origin_x: -5.0
-      origin_y: -5.0
       track_unknown_space: true
       resolution: 0.05
-      plugins: ["obstacle_layer", "inflation_layer"] #plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      # static_layer:
-      #   plugin: "nav2_costmap_2d::StaticLayer"
-      #   map_subscribe_transient_local: true
+      footprint: "[ [0.35, 0.20], [0.35, -0.20], [-0.35, -0.20], [-0.35, 0.20] ]"
+      plugins: ["obstacle_layer", "inflation_layer"]
+
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: scan
+        observation_sources: scan camera_scan
         scan:
           topic: /scan
           max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+        camera_scan:
+          topic: /camera_scan
+          max_obstacle_height: 1.0
           min_obstacle_height: 0.05
           clearing: true
           marking: true
@@ -131,8 +134,10 @@ planner_server:
   ros__parameters:
     expected_planner_plugins: ["GridBased"]
     use_sim_time: false
+
+    #NavFn Straight-Line Global Planner Configuration
     GridBased:
       plugin: "nav2_navfn_planner/NavfnPlanner"
       tolerance: 0.5
       use_astar: false
-      allow_unknown: true  # Forces a straight vector path through empty space
+      allow_unknown: true  # Computes direct pathways over uncharted local costmaps

@@ -20,6 +20,28 @@ def generate_launch_description():
         arguments=['0', '0', '0', '-1.5708', '0', '-1.5708', 'camera_link', 'camera_depth_optical_frame']
     )
 
+    # Depth Image to LaserScan Node
+    # Compresses raw depth image slices into a 2D flat barrier map for active obstacle avoidance
+    depth_to_laserscan_node = Node(
+        package='depthimage_to_laserscan',
+        executable='depthimage_to_laserscan_node',
+        name='depthimage_to_laserscan',
+        output='screen',
+        remappings=[
+            ('depth', '/camera/depth/image_rect_raw'),
+            ('depth_camera_info', '/camera/depth/camera_info'),
+            ('scan', '/camera_scan') 
+        ],
+        parameters=[{
+            'scan_time': 0.033,
+            'scan_height': 20,
+            'depth_min': 0.25,
+            'depth_max': 3.5,
+            'output_frame_id': 'camera_depth_optical_frame' # Keep this here
+        }],
+        arguments=['--ros-args', '-p', 'output_frame_id:=camera_depth_optical_frame']
+    )
+
     # Target Projector C++ Node
     target_projector_node = Node(
         package='go2_nav2_bridge',
@@ -31,6 +53,7 @@ def generate_launch_description():
     return LaunchDescription([
         static_tf_structural,
         static_tf_optical,
+        depth_to_laserscan_node,
         target_projector_node
     ])
 

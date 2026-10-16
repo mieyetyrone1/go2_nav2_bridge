@@ -34,7 +34,11 @@ class MockTrackerNode(Node):
         info_msg.header.frame_id = 'camera_depth_optical_frame'
         info_msg.width = 640
         info_msg.height = 480
+        info_msg.distortion_model = 'plumb_bob' # Standard pinhole camera model name
+        info_msg.d = [0.0, 0.0, 0.0, 0.0, 0.0]  # Zero out distortion coefficients
         info_msg.k = [525.0, 0.0, 320.0, 0.0, 525.0, 240.0, 0.0, 0.0, 1.0]
+        info_msg.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]  # Identity rotation matrix
+        info_msg.p = [525.0, 0.0, 320.0, 0.0, 0.0, 525.0, 240.0, 0.0, 0.0, 0.0, 1.0, 0.0]  # Projection matrix
         self.info_pub.publish(info_msg)
 
         # 2. Bounding Box

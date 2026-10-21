@@ -77,5 +77,12 @@ install(DIRECTORY launch config
   DESTINATION share/${PROJECT_NAME}
 )
 
+# Install Python scripts directory so ROS 2 can discover the executables
+install(DIRECTORY
+  scripts/
+  DESTINATION share/${PROJECT_NAME}/scripts
+  PATTERN "*" PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
+)
+
 ament_package()
 

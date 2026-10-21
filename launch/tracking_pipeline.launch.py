@@ -1,5 +1,7 @@
+import os
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     # Physical Structural Transform (Nose Mount)
@@ -50,10 +52,23 @@ def generate_launch_description():
         output='screen'
     )
 
+    # YOLO-World + ByteTrack Python Vision Inference Node
+    yolo_bytetrack_node = Node(
+        package='go2_nav2_bridge',
+        executable=os.path.join(
+            get_package_share_directory('go2_nav2_bridge'),
+            'scripts',
+            'yolo_bytetrack_node.py'
+        ),
+        name='yolo_bytetrack_processor',
+        output='screen'
+    )
+
     return LaunchDescription([
         static_tf_structural,
         static_tf_optical,
         depth_to_laserscan_node,
-        target_projector_node
+        target_projector_node,
+        yolo_bytetrack_node
     ])
 

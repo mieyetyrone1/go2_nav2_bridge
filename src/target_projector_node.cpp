@@ -10,6 +10,7 @@
 #include "message_filters/subscriber.h"
 #include "message_filters/time_synchronizer.h"
 #include "message_filters/sync_policies/exact_time.h"
+#include "message_filters/sync_policies/approximate_time.h"
 
 #include "tf2_ros/transform_listener.h"
 #include "tf2_ros/buffer.h"
@@ -20,6 +21,10 @@ class TargetProjectorNode : public rclcpp::Node
 public:
     TargetProjectorNode() : Node("target_projector_node")
     {
+        // Declare the Sensor Data QoS Profile to handle the RealSense driver rules
+        rmw_qos_profile_t custom_qos = rmw_qos_profile_sensor_data;
+        custom_qos.depth = 10;
+
         goal_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("/goal_pose", 10);
         
         tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
@@ -29,11 +34,14 @@ public:
             "/camera/depth/camera_info", 10,
             std::bind(&TargetProjectorNode::infoCallback, this, std::placeholders::_1));
         
-        bbox_sub_.subscribe(this, "/tracker/tracked_target");
-        depth_sub_.subscribe(this, "/camera/depth/image_rect_raw");
+        bbox_sub_.subscribe(this, "/tracker/tracked_target", custom_qos);
+        depth_sub_.subscribe(this, "/camera/depth/image_rect_raw", custom_qos);
         
         sync_ = std::make_unique<message_filters::Synchronizer<SyncPolicy>>(
             SyncPolicy(10), bbox_sub_, depth_sub_);
+        
+        sync_->setInterMessageLowerBound(0, rclcpp::Duration::from_seconds(0.1));
+        sync_->setInterMessageLowerBound(1, rclcpp::Duration::from_seconds(0.1));
 
         sync_->registerCallback(std::bind(&TargetProjectorNode::synchronizedCallback,
             this, std::placeholders::_1, std::placeholders::_2));
@@ -80,19 +88,26 @@ private:
         const geometry_msgs::msg::PolygonStamped::ConstSharedPtr bbox_msg,
         const sensor_msgs::msg::Image::ConstSharedPtr depth_msg)
     {
+        // HEARTBEAT 1: Did the message filter synchronizer pair the messages?
+        RCLCPP_INFO(this->get_logger(), "[DEBUG 1] Callback triggered! Messages paired by ApproximateTime.");
+
         // Latch Check: If we already locked onto the target once, stop flooding Nav2
         if (goal_sent_) {
-        return;
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "[DEBUG] Goal already sent, skipping callback logic.");
+            return;
         }
 
         if (!has_calibration_) {
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Waiting for initial CameraInfo metadata stream...");
             return;
         }
+        RCLCPP_INFO(this->get_logger(), "[DEBUG 2] Calibration validation passed.");
 
-        if (bbox_msg->polygon.points.size() < 2) { 
-            return; 
+        if (bbox_msg->polygon.points.size() < 2) {
+            RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Polygon box message has less than 2 points! Size: %zu", bbox_msg->polygon.points.size());
+            return;
         }
+        RCLCPP_INFO(this->get_logger(), "[DEBUG 3] Bounding box point count validated.");
 
         double x_min = bbox_msg->polygon.points[0].x;
         double y_min = bbox_msg->polygon.points[0].y;
@@ -102,44 +117,55 @@ private:
         int u = static_cast<int>(x_min + (x_max - x_min) / 2.0);
         int v = static_cast<int>(y_min + (y_max - y_min) / 2.0);
 
+        // HEARTBEAT 4: Calculate center pixel and check image array boundaries
+        RCLCPP_INFO(this->get_logger(), "[DEBUG 4] Target center pixel calculated at u: %d, v: %d. Depth Image Size: %dx%d", 
+                    u, v, depth_msg->width, depth_msg->height);
+
         if (u < 0 || u >= static_cast<int>(depth_msg->width) || v < 0 || v >= static_cast<int>(depth_msg->height)) {
+            RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Calculated center pixel falls OUTSIDE depth image dimensions!");
             return;
         }
+        RCLCPP_INFO(this->get_logger(), "[DEBUG 5] Pixel boundary constraints passed.");
 
         // RealSense standard raw depth format is uint16_t in millimeters
         const uint16_t* depth_data = reinterpret_cast<const uint16_t*>(&depth_msg->data[0]);
         int row_stride = depth_msg->step / sizeof(uint16_t);
-        double z_c = depth_data[v * row_stride + u] / 1000.0; 
+        double z_c = depth_data[v * row_stride + u] / 1000.0;
+
+        // HEARTBEAT 6: Inspect the raw depth value reading
+        RCLCPP_INFO(this->get_logger(), "[DEBUG 6] Raw distance read from center pixel: %f meters.", z_c);
 
         if (z_c <= 0.1 || z_c > 4.0) { // Prune noise limits outside of steady tracking zones
+            RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Distance %f is outside of tracking constraints (0.1m - 4.0m)!", z_c);
             return;
         }
+        RCLCPP_INFO(this->get_logger(), "[DEBUG 7] Depth threshold checks passed. Transforming coordinates...");
 
         geometry_msgs::msg::PointStamped camera_point;
-        camera_point.header = depth_msg->header; 
+        camera_point.header = depth_msg->header;
         camera_point.point.x = ((u - cx_) * z_c) / fx_;
         camera_point.point.y = ((v - cy_) * z_c) / fy_;
         camera_point.point.z = z_c;
 
         geometry_msgs::msg::PointStamped odom_point;
         try {
-            // Changed target tracking lookup from map to odom frame
             odom_point = tf_buffer_->transform(camera_point, "odom");
         }
-        catch (tf2::TransformException &ex) {
+        // Fixed type catch to avoid build compiler warnings
+        catch (const tf2::TransformException &ex) {
             RCLCPP_ERROR(this->get_logger(), "Transform execution failed: %s", ex.what());
             return;
         }
 
         geometry_msgs::msg::PoseStamped nav_goal;
         nav_goal.header.stamp = depth_msg->header.stamp;
-        nav_goal.header.frame_id = "odom"; // Locked tracking reference to stable odom space 
+        nav_goal.header.frame_id = "odom"; 
         nav_goal.pose.position = odom_point.point;
-        nav_goal.pose.orientation.w = 1.0; 
+        nav_goal.pose.orientation.w = 1.0;
 
         RCLCPP_INFO(this->get_logger(), "[TARGET ACQUIRED] Locking static Odom target at X: %f, Y: %f", odom_point.point.x, odom_point.point.y);
         goal_pub_->publish(nav_goal);
-        goal_sent_ = true; // Lock the latch so the robot walks smoothly to this specific coordinate spot
+        goal_sent_ = true; 
     }
 
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
@@ -147,7 +173,7 @@ private:
     message_filters::Subscriber<geometry_msgs::msg::PolygonStamped> bbox_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
 
-    using SyncPolicy = message_filters::sync_policies::ExactTime<geometry_msgs::msg::PolygonStamped, sensor_msgs::msg::Image>;
+    using SyncPolicy = message_filters::sync_policies::ApproximateTime<geometry_msgs::msg::PolygonStamped, sensor_msgs::msg::Image>;
     std::unique_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
 
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_{nullptr};

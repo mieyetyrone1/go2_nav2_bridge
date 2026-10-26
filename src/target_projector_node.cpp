@@ -141,31 +141,60 @@ private:
         }
         RCLCPP_INFO(this->get_logger(), "[DEBUG 7] Depth threshold checks passed. Transforming coordinates...");
 
-        geometry_msgs::msg::PointStamped camera_point;
-        camera_point.header = depth_msg->header;
-        camera_point.point.x = ((u - cx_) * z_c) / fx_;
-        camera_point.point.y = ((v - cy_) * z_c) / fy_;
-        camera_point.point.z = z_c;
+        const double SAFETY_BUFFER = 0.5; // 50 cm safety zone
 
-        geometry_msgs::msg::PointStamped odom_point;
-        try {
-            odom_point = tf_buffer_->transform(camera_point, "odom");
+        if (z_c > SAFETY_BUFFER) {
+            z_c = z_c - SAFETY_BUFFER; // Shifting the target point 50cm closer to the robot
+            RCLCPP_INFO(this->get_logger(), "[SAFETY SHIFT] Vector shifted. New depth coordinate sent to Nav2: %f meters.", z_c);
+        } else {
+            // If already within 50cm, pull the goal instantly to the robot's sensor origin
+            z_c = 0.0; 
         }
-        // Fixed type catch to avoid build compiler warnings
+
+        // 1. Create a full PoseStamped instead of just a PointStamped
+        geometry_msgs::msg::PoseStamped camera_pose;
+        camera_pose.header = depth_msg->header;
+
+        // Assign positions (using our safely shifted z_c)
+        camera_pose.pose.position.x = ((u - cx_) * z_c) / fx_;
+        camera_pose.pose.position.y = ((v - cy_) * z_c) / fy_;
+        camera_pose.pose.position.z = z_c;
+
+        // 2. Calculate the dynamic heading angle (Yaw) facing the target
+        double yaw = std::atan2(camera_pose.pose.position.x, camera_pose.pose.position.z);
+
+        // 3. Convert that Yaw angle into a local Quaternion
+        tf2::Quaternion q;
+        q.setRPY(0.0, 0.0, yaw); // Roll = 0, Pitch = 0, Yaw = calculated angle
+        camera_pose.pose.orientation = tf2::toMsg(q);
+
+        // 4. Transform the entire position AND orientation into Odom cleanly
+        geometry_msgs::msg::PoseStamped nav_goal;
+        try {
+            nav_goal = tf_buffer_->transform(camera_pose, "odom");
+        }
         catch (const tf2::TransformException &ex) {
             RCLCPP_ERROR(this->get_logger(), "Transform execution failed: %s", ex.what());
             return;
         }
 
-        geometry_msgs::msg::PoseStamped nav_goal;
+        // Ensure the timestamp updates cleanly for Nav2 tracking loops
         nav_goal.header.stamp = depth_msg->header.stamp;
-        nav_goal.header.frame_id = "odom"; 
-        nav_goal.pose.position = odom_point.point;
-        nav_goal.pose.orientation.w = 1.0;
 
-        RCLCPP_INFO(this->get_logger(), "[TARGET ACQUIRED] Locking static Odom target at X: %f, Y: %f", odom_point.point.x, odom_point.point.y);
+        // 1. Convert the transformed ROS quaternion back into a tf2 quaternion
+        tf2::Quaternion q_odom;
+        tf2::fromMsg(nav_goal.pose.orientation, q_odom);
+
+        // 2. Extract Roll, Pitch, and Yaw in the Odom frame
+        double roll, pitch, odom_yaw;
+        tf2::Matrix3x3(q_odom).getRPY(roll, pitch, odom_yaw);
+
+        // 3. Print the true, transformed global yaw
+        RCLCPP_INFO(this->get_logger(), "[TARGET ACQUIRED] Locking dynamic facing target at X: %f, Y: %f | Global Yaw: %f rad",
+                    nav_goal.pose.position.x, nav_goal.pose.position.y, odom_yaw);
+
         goal_pub_->publish(nav_goal);
-        goal_sent_ = true; 
+        goal_sent_ = true;
     }
 
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;

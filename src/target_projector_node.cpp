@@ -38,7 +38,7 @@ public:
         depth_sub_.subscribe(this, "/camera/depth/image_rect_raw", custom_qos);
         
         sync_ = std::make_unique<message_filters::Synchronizer<SyncPolicy>>(
-            SyncPolicy(10), bbox_sub_, depth_sub_);
+            SyncPolicy(30), bbox_sub_, depth_sub_);
         
         sync_->setInterMessageLowerBound(0, rclcpp::Duration::from_seconds(0.1));
         sync_->setInterMessageLowerBound(1, rclcpp::Duration::from_seconds(0.1));
@@ -145,7 +145,7 @@ private:
             z_c = 0.0; 
         }
 
-        if (z_c <= 0.1 || z_c > 4.0) { // Prune noise limits outside of steady tracking zones
+        if (z_c <= 0.1 || z_c > 6.0) { // Prune noise limits outside of steady tracking zones
             RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Distance %f is outside of tracking constraints (0.1m - 4.0m)!", z_c);
             return;
         }

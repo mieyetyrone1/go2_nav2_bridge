@@ -33,7 +33,7 @@ class YoloByteTrackNode(Node):
         self.model = YOLOWorld(model_path)
         
         # CONFIGURE CUSTOM OPEN-VOCABULARY TEXT TARGET
-        self.target_class_label = "brown box" 
+        self.target_class_label = "black sneakers" 
         self.model.set_classes([self.target_class_label])
         
         self.get_logger().info(f"YOLO-World + ByteTrack initialized! Tracking custom text prompt: '{self.target_class_label}'")

@@ -47,7 +47,8 @@ public:
             this, std::placeholders::_1, std::placeholders::_2));
         
         has_calibration_ = false;
-        goal_sent_ = false; // Initialize the safety latch variable
+        has_sent_first_goal_ = false;
+        last_goal_published_time_ = this->now();
         RCLCPP_INFO(this->get_logger(), "C++ Dynamic Target Projector Node Initialized!");
     }
 
@@ -88,12 +89,12 @@ private:
         const geometry_msgs::msg::PolygonStamped::ConstSharedPtr bbox_msg,
         const sensor_msgs::msg::Image::ConstSharedPtr depth_msg)
     {
-        // HEARTBEAT 1: Did the message filter synchronizer pair the messages?
-        RCLCPP_INFO(this->get_logger(), "[DEBUG 1] Callback triggered! Messages paired by ApproximateTime.");
+        // 1. TIME-GATE: Throttle updates to a maximum frequency of 2 Hz (0.5 second interval)
+        rclcpp::Time current_time = this->now();
+        double time_since_last_goal = (current_time - last_goal_published_time_).seconds();
 
-        // Latch Check: If we already locked onto the target once, stop flooding Nav2
-        if (goal_sent_) {
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "[DEBUG] Goal already sent, skipping callback logic.");
+        if (time_since_last_goal < 0.5 && time_since_last_goal > 0.0) {
+            // Drop the callback silently to keep the pipeline moving without flooding Nav2
             return;
         }
 
@@ -101,14 +102,13 @@ private:
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Waiting for initial CameraInfo metadata stream...");
             return;
         }
-        RCLCPP_INFO(this->get_logger(), "[DEBUG 2] Calibration validation passed.");
 
         if (bbox_msg->polygon.points.size() < 2) {
-            RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Polygon box message has less than 2 points! Size: %zu", bbox_msg->polygon.points.size());
+            RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Polygon box message has less than 2 points!");
             return;
         }
-        RCLCPP_INFO(this->get_logger(), "[DEBUG 3] Bounding box point count validated.");
 
+        // Extract the bounding box coordinates (assuming standard bounding box format)
         double x_min = bbox_msg->polygon.points[0].x;
         double y_min = bbox_msg->polygon.points[0].y;
         double x_max = bbox_msg->polygon.points[1].x;
@@ -117,65 +117,83 @@ private:
         int u = static_cast<int>(x_min + (x_max - x_min) / 2.0);
         int v = static_cast<int>(y_min + (y_max - y_min) / 2.0);
 
-        // HEARTBEAT 4: Calculate center pixel and check image array boundaries
-        RCLCPP_INFO(this->get_logger(), "[DEBUG 4] Target center pixel calculated at u: %d, v: %d. Depth Image Size: %dx%d", 
-                    u, v, depth_msg->width, depth_msg->height);
-
         if (u < 0 || u >= static_cast<int>(depth_msg->width) || v < 0 || v >= static_cast<int>(depth_msg->height)) {
             RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Calculated center pixel falls OUTSIDE depth image dimensions!");
             return;
         }
-        RCLCPP_INFO(this->get_logger(), "[DEBUG 5] Pixel boundary constraints passed.");
 
-        // RealSense standard raw depth format is uint16_t in millimeters
+        // Read raw depth (RealSense format: uint16_t in millimeters)
         const uint16_t* depth_data = reinterpret_cast<const uint16_t*>(&depth_msg->data[0]);
         int row_stride = depth_msg->step / sizeof(uint16_t);
         double z_c = depth_data[v * row_stride + u] / 1000.0;
 
-        // HEARTBEAT 6: Inspect the raw depth value reading
-        RCLCPP_INFO(this->get_logger(), "[DEBUG 6] Raw distance read from center pixel: %f meters.", z_c);
-
-        const double SAFETY_BUFFER = 0.5; // 50 cm safety zone
-
-        if (z_c > SAFETY_BUFFER) {
-            z_c = z_c - SAFETY_BUFFER; // Shifting the target point 50cm closer to the robot
-            RCLCPP_INFO(this->get_logger(), "[SAFETY SHIFT] Vector shifted. New depth coordinate sent to Nav2: %f meters.", z_c);
-        } else {
-            // If already within 50cm, pull the goal instantly to the robot's sensor origin
-            z_c = 0.0; 
-        }
-
-        if (z_c <= 0.1 || z_c > 6.0) { // Prune noise limits outside of steady tracking zones
-            RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Distance %f is outside of tracking constraints (0.1m - 4.0m)!", z_c);
+        // Depth constraints floor and ceiling gates
+        if (z_c <= 0.1 || z_c > 6.0) { 
+            RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Distance %f is outside of tracking constraints (0.1m - 6.0m)!", z_c);
             return;
         }
-        RCLCPP_INFO(this->get_logger(), "[DEBUG 7] Depth threshold checks passed. Transforming coordinates...");
 
+        // Apply the 0.5m safety braking vector shift
+        const double SAFETY_BUFFER = 0.5; 
+        if (z_c > SAFETY_BUFFER) {
+            z_c = z_c - SAFETY_BUFFER; 
+        } else {
+            z_c = 0.0;
+        }
+
+        // Project raw 3D camera frame coordinates
         geometry_msgs::msg::PointStamped camera_point;
-        camera_point.header = depth_msg->header;
+
+        // FORCE lookups to use the current time clock frame to eliminate history warping
+        camera_point.header.stamp = rclcpp::Time(0, 0); 
+        camera_point.header.frame_id = depth_msg->header.frame_id;
         camera_point.point.x = ((u - cx_) * z_c) / fx_;
         camera_point.point.y = ((v - cy_) * z_c) / fy_;
         camera_point.point.z = z_c;
 
         geometry_msgs::msg::PointStamped odom_point;
         try {
+            // Enforce a strict transform lookup gate
             odom_point = tf_buffer_->transform(camera_point, "odom");
         }
-        // Fixed type catch to avoid build compiler warnings
         catch (const tf2::TransformException &ex) {
             RCLCPP_ERROR(this->get_logger(), "Transform execution failed: %s", ex.what());
             return;
         }
 
+        // --- DISPLACEMENT ARRIVAL GATE ---
+        if (has_sent_first_goal_) {
+            double dx = odom_point.point.x - last_sent_odom_point_.x;
+            double dy = odom_point.point.y - last_sent_odom_point_.y;
+            double target_displacement = std::sqrt(dx * dx + dy * dy);
+
+            // If the target calculation shifts less than 15cm, drop the frame 
+            // and allow Nav2 to execute its stable arrival braking trajectory.
+            if (target_displacement < 0.15) {
+                RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000, 
+                                    "[SHADOW] Target stationary (shifted %.2fm). Allowing Nav2 to decelerate.", target_displacement);
+                return; 
+            }
+        }
+
+        // Construct the full Nav2 Goal message
         geometry_msgs::msg::PoseStamped nav_goal;
-        nav_goal.header.stamp = depth_msg->header.stamp;
-        nav_goal.header.frame_id = "odom"; 
+        nav_goal.header.stamp = this->now(); // Clear historical stamp latency
+        nav_goal.header.frame_id = "odom";
         nav_goal.pose.position = odom_point.point;
+        nav_goal.pose.orientation.x = 0.0;
+        nav_goal.pose.orientation.y = 0.0;
+        nav_goal.pose.orientation.z = 0.0;
         nav_goal.pose.orientation.w = 1.0;
 
-        RCLCPP_INFO(this->get_logger(), "[TARGET ACQUIRED] Locking static Odom target at X: %f, Y: %f", odom_point.point.x, odom_point.point.y);
+        RCLCPP_INFO(this->get_logger(), "[SHADOW UPDATE] Streaming continuous Odom target at X: %f, Y: %f (dt: %.2fs)", 
+                    odom_point.point.x, odom_point.point.y, time_since_last_goal);
+        
+        // Publish and cache states
         goal_pub_->publish(nav_goal);
-        goal_sent_ = true; 
+        last_sent_odom_point_ = odom_point.point;
+        has_sent_first_goal_ = true;
+        last_goal_published_time_ = current_time; 
     }
 
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
@@ -191,7 +209,9 @@ private:
 
     double fx_, fy_, cx_, cy_;
     bool has_calibration_;
-    bool goal_sent_; // Latch state declaration
+    rclcpp::Time last_goal_published_time_;
+    geometry_msgs::msg::Point last_sent_odom_point_;
+    bool has_sent_first_goal_ = false;
 };
 
 int main(int argc, char * argv[])

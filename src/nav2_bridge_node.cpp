@@ -12,6 +12,8 @@
 #include "tf2_ros/transform_broadcaster.h"
 #include "unitree_api/msg/request.hpp"
 #include "common/ros2_sport_client.h"
+#include "nav2_msgs/action/navigate_to_pose.hpp"
+#include "action_msgs/srv/cancel_goal.hpp"
 
 class Go2Nav2Bridge : public rclcpp::Node
 {
@@ -34,6 +36,11 @@ public:
         pointcloud_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
             "/utlidar/cloud_deskewed", hardware_qos, std::bind(&Go2Nav2Bridge::pointcloudCallback, this, std::placeholders::_1));
 
+        nav_feedback_sub_ = this->create_subscription<nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage>(
+            "/navigate_to_pose/_action/feedback", 10, std::bind(&Go2Nav2Bridge::feedbackCallback, this, std::placeholders::_1));
+
+        nav_cancel_client_ = this->create_client<action_msgs::srv::CancelGoal>("/navigate_to_pose/_action/cancel_goal");
+
         // FIXED TYPO: Added missing class member variable underscore suffix
         scan_pub_ = this->create_publisher<sensor_msgs::msg::LaserScan>("/scan", rclcpp::QoS(10).reliable());
 
@@ -46,7 +53,8 @@ public:
         
         time_offset_calculated_ = false;
         time_offset_seconds_ = 0.0;
-        
+        distance_remaining_ = 999.0;
+
         RCLCPP_INFO(this->get_logger(), "Go2 Nav2 Velocity Diagnostic Bridge Active!");
     }
 
@@ -141,7 +149,25 @@ private:
         float vy = msg->linear.y;
         float vyaw = msg->angular.z;
         
-        std::cout << "[TWIST RECEIVED] vx: " << vx << " | vy: " << vy << " | vyaw: " << vyaw << std::endl;
+        std::cout << "[TWIST RECEIVED] vx: " << vx << " | vy: " << vy << " | vyaw: " << vyaw << " | Dist Remaining: " << distance_remaining_ << std::endl;
+        
+        // Trigger early stop if we are 0.3 meters or closer to the destination
+        if (distance_remaining_ <= 0.30) {
+            std::cout << "[EARLY STOP TRIGGERED] Robot is " << distance_remaining_ << "m away. Stopping and canceling goal." << std::endl;
+            // Force all commands to absolute zero instantly
+            vx = 0.0;
+            vy = 0.0;
+            vyaw = 0.0;
+            // Tell Nav2 to cancel the active goal so the action server finishes cleanly
+            if (nav_cancel_client_->service_is_ready()) {
+                auto cancel_req = std::make_shared<action_msgs::srv::CancelGoal::Request>();
+                nav_cancel_client_->async_send_request(cancel_req);
+                std::cout << "[CANCEL SENT] Sent clean cancel to Nav2 action server." << std::endl;
+            }
+            // Reset distance tracking so it doesn't repeatedly spam cancel requests
+            distance_remaining_ = 999.0;
+        }
+
         msg_counter_++;
         req_.header.identity.id = msg_counter_;
         req_.header.policy.priority = 0;
@@ -151,15 +177,23 @@ private:
         sport_req_pub_->publish(req_);
     }
 
+    void feedbackCallback(const nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage::SharedPtr msg)
+    {
+        distance_remaining_ = msg->feedback.distance_remaining;
+    }
+
     rclcpp::Publisher<unitree_api::msg::Request>::SharedPtr sport_req_pub_;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr twist_sub_;
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pointcloud_sub_;
+    rclcpp::Subscription<nav2_msgs::action::NavigateToPose::Impl::FeedbackMessage>::SharedPtr nav_feedback_sub_;
+    rclcpp::Client<action_msgs::srv::CancelGoal>::SharedPtr nav_cancel_client_;
     rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scan_pub_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     SportClient sport_client_;
     unitree_api::msg::Request req_;
     rclcpp::Time boot_time_;
+    float distance_remaining_;	
     int64_t msg_counter_;
     int64_t odom_dbg_counter_;
     int64_t cloud_dbg_counter_;

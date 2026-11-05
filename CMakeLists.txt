@@ -24,6 +24,7 @@ find_package(unitree_api REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED) 
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -50,6 +51,7 @@ ament_target_dependencies(nav2_bridge_node
   unitree_api 
   nav_msgs 
   tf2_ros
+  nav2_msgs
 )
 
 # TARGET 2: New Target Projection Node

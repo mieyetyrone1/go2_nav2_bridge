@@ -135,18 +135,9 @@ private:
         // HEARTBEAT 6: Inspect the raw depth value reading
         RCLCPP_INFO(this->get_logger(), "[DEBUG 6] Raw distance read from center pixel: %f meters.", z_c);
 
-        const double SAFETY_BUFFER = 0.5; // 50 cm safety zone
-
-        if (z_c > SAFETY_BUFFER) {
-            z_c = z_c - SAFETY_BUFFER; // Shifting the target point 50cm closer to the robot
-            RCLCPP_INFO(this->get_logger(), "[SAFETY SHIFT] Vector shifted. New depth coordinate sent to Nav2: %f meters.", z_c);
-        } else {
-            // If already within 50cm, pull the goal instantly to the robot's sensor origin
-            z_c = 0.0; 
-        }
-
-        if (z_c <= 0.1 || z_c > 6.0) { // Prune noise limits outside of steady tracking zones
-            RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Distance %f is outside of tracking constraints (0.1m - 4.0m)!", z_c);
+        // Updated tracking constraints matching the 70cm base_link cancellation profile.
+        if (z_c <= 0.3 || z_c > 6.0) { // Prune noise limits outside of steady tracking zones
+            RCLCPP_WARN(this->get_logger(), "[DEBUG FAIL] Distance %f is outside of tracking constraints (0.3m - 6.0m)!", z_c);
             return;
         }
         RCLCPP_INFO(this->get_logger(), "[DEBUG 7] Depth threshold checks passed. Transforming coordinates...");

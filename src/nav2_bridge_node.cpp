@@ -151,8 +151,8 @@ private:
         
         std::cout << "[TWIST RECEIVED] vx: " << vx << " | vy: " << vy << " | vyaw: " << vyaw << " | Dist Remaining: " << distance_remaining_ << std::endl;
         
-        // Trigger early stop if we are 0.3 meters or closer to the destination
-        if (distance_remaining_ <= 0.30) {
+        // Trigger early stop if we are 0.7 meters (relative to base_link) or closer to the destination
+        if (distance_remaining_ <= 0.70) {
             std::cout << "[EARLY STOP TRIGGERED] Robot is " << distance_remaining_ << "m away. Stopping and canceling goal." << std::endl;
             // Force all commands to absolute zero instantly
             vx = 0.0;

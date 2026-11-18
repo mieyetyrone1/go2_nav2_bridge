@@ -1,0 +1,11 @@
+# Goal
+string command
+---
+# Result
+bool success
+string extracted_action
+string extracted_target
+string message
+---
+# Feedback
+string current_state

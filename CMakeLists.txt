@@ -1,4 +1,7 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.10)
+if(POLICY CMP0148)
+  cmake_policy(SET CMP0148 OLD)
+endif()
 project(go2_nav2_bridge)
 
 if(NOT CMAKE_C_STANDARD)
@@ -15,7 +18,10 @@ endif()
 
 # Find all required packages
 find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclpy REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(message_filters REQUIRED)
@@ -24,7 +30,13 @@ find_package(unitree_api REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
-find_package(nav2_msgs REQUIRED) 
+find_package(nav2_msgs REQUIRED)
+find_package(action_msgs REQUIRED)
+
+# Generate custom ExecuteCognitiveIntent action interface
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "action/ExecuteCognitiveIntent.action"
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -68,10 +80,17 @@ ament_target_dependencies(target_projector_node
   tf2_geometry_msgs
 )
 
-# Installation Rules for Executables & Assets
+# Installation Rules for C++ Executables
 install(TARGETS
   nav2_bridge_node
   target_projector_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install Python Cognitive FSM Node & Grammar helper for `ros2 run`
+install(PROGRAMS
+  scripts/cognitive_fsm_node.py
+  scripts/fsm_grammar.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -86,5 +105,6 @@ install(DIRECTORY
   PATTERN "*" PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ
 )
 
+ament_export_dependencies(rosidl_default_runtime)
 ament_package()
 

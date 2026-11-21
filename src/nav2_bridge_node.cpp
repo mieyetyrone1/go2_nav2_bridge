@@ -151,8 +151,10 @@ private:
         
         std::cout << "[TWIST RECEIVED] vx: " << vx << " | vy: " << vy << " | vyaw: " << vyaw << " | Dist Remaining: " << distance_remaining_ << std::endl;
         
+        bool is_in_place_goal_spin = (distance_remaining_ <= 0.90 && std::abs(msg->linear.x) < 1e-3 && std::abs(msg->angular.z) > 0.05);
+
         // Trigger early stop if we are 0.7 meters (relative to base_link) or closer to the destination
-        if (distance_remaining_ <= 0.70) {
+        if (distance_remaining_ <= 0.70 || is_in_place_goal_spin) {
             std::cout << "[EARLY STOP TRIGGERED] Robot is " << distance_remaining_ << "m away. Stopping and canceling goal." << std::endl;
             // Force all commands to absolute zero instantly
             vx = 0.0;

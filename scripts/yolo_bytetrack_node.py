@@ -14,6 +14,8 @@ from sensor_msgs.msg import Image
 from geometry_msgs.msg import PolygonStamped, Point32
 from cv_bridge import CvBridge
 import cv2
+import threading
+from std_msgs.msg import String
 
 # Import the dedicated Open-Vocabulary YOLO-World Engine
 from ultralytics import YOLOWorld
@@ -24,8 +26,10 @@ class YoloByteTrackNode(Node):
         
         # Topic Subscriptions & Publishers
         self.image_sub = self.create_subscription(Image, '/camera/color/image_raw', self.camera_callback, 10)
+        self.vocab_sub = self.create_subscription(String, '/update_yolo_vocabulary', self.vocabulary_callback, 10)
         self.bbox_pub = self.create_publisher(PolygonStamped, '/tracker/tracked_target', 10)
         self.bridge = CvBridge()
+        self.model_lock = threading.Lock()
         
         # Load Dedicated YOLO-World Model
         model_path = os.path.expanduser('~/go2_nav2_ws/yolov8s-worldv2.pt')
@@ -33,23 +37,45 @@ class YoloByteTrackNode(Node):
         self.model = YOLOWorld(model_path)
         
         # CONFIGURE CUSTOM OPEN-VOCABULARY TEXT TARGET
-        self.target_class_label = "brown box" 
-        self.model.set_classes([self.target_class_label])
-        
-        self.get_logger().info(f"YOLO-World + ByteTrack initialized! Tracking custom text prompt: '{self.target_class_label}'")
+        self.target_class_label = None 
+        self.get_logger().info(f"YOLO-World + ByteTrack initialized in STANDBY. Waiting for /update_yolo_vocabulary...")
+
+    def vocabulary_callback(self, msg: String):
+        new_target = msg.data.strip().lower()
+        with self.model_lock:
+            if not new_target:
+                self.target_class_label = None
+                self.get_logger().info("Vocabulary cleared. YOLO-World returning to STANDBY.")
+                return
+
+            if new_target == self.target_class_label:
+                return
+
+            self.get_logger().info(
+                f"Updating YOLO-World vocabulary: '{self.target_class_label}' -> '{new_target}'"
+            )
+            self.target_class_label = new_target
+            self.model.set_classes([self.target_class_label])
+
+            if getattr(self.model, 'predictor', None) is not None:
+                trackers = getattr(self.model.predictor, 'trackers', None)
+                if trackers:
+                    trackers.reset()
 
     def camera_callback(self, msg):
         try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            
-            # Execute Tracking Loop using the custom text vocabulary profile
-            results = self.model.track(
-                frame, 
-                persist=True, 
-                tracker="bytetrack.yaml", 
-                conf=0.20, 
-                verbose=False
-            )
+            with self.model_lock:
+                if self.target_class_label is None:
+                    return
+                active_label = self.target_class_label
+                frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+                results = self.model.track(
+                    frame,
+                    persist=True,
+                    tracker="bytetrack.yaml",
+                    conf=0.20,
+                    verbose=False
+                )
             
             # Check if targets are active in frame
             if results and len(results) > 0 and results[0].boxes is not None and results[0].boxes.id is not None:

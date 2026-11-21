@@ -145,7 +145,7 @@ class CognitiveFSMNode(Node):
     def run_fsm_pipeline(
         self, command_text: str, goal_handle=None
     ) -> Tuple[bool, str, str, str]:
-        """Core deterministic FSM execution pipeline (Step 1 base flow)."""
+        """Minimal Stage 1: Parse intent via LLM and publish target to YOLO-World."""
         self._transition_state(FSMState.PARSING_INTENT, goal_handle)
         try:
             intent = self.parse_intent(command_text)
@@ -153,82 +153,29 @@ class CognitiveFSMNode(Node):
             err_msg = f'Intent parsing failed: {exc}'
             self.get_logger().error(err_msg)
             self._transition_state(FSMState.FAILED, goal_handle)
+            self._transition_state(FSMState.IDLE)
             return False, '', '', err_msg
 
         action = intent.get('action', '')
         target = intent.get('target', '').strip()
 
-        if action == 'stop' or not target:
-            self.get_logger().info('Stop intent received. Halting robot.')
-            self._emergency_stop()
-            self._transition_state(FSMState.COMPLETED, goal_handle)
-            return True, action, target, 'Robot halted cleanly.'
-
-        # Step 1: Update YOLO-World open-vocabulary class
         self._transition_state(FSMState.UPDATING_PERCEPTION, goal_handle)
-        with self.goal_lock:
-            self.latest_goal_pose = None
-
         vocab_msg = String()
+        if action == 'stop' or not target:
+            vocab_msg.data = ''
+            self.vocab_pub.publish(vocab_msg)
+            self.get_logger().info('Stop intent received. Cleared YOLO-World vocabulary (STANDBY).')
+            self._transition_state(FSMState.COMPLETED, goal_handle)
+            self._transition_state(FSMState.IDLE)
+            return True, action, target, 'Cleared YOLO-World target (STANDBY).'
+
         vocab_msg.data = target
         self.vocab_pub.publish(vocab_msg)
         self.get_logger().info(f'Published target vocabulary to YOLO-World: "{target}"')
 
-        # Wait for Target Projection Node to publish 3D /goal_pose
-        deadline = time.time() + self.target_timeout_sec
-        acquired_pose: Optional[PoseStamped] = None
-        while time.time() < deadline and rclpy.ok():
-            if goal_handle is not None and goal_handle.is_cancel_requested:
-                self._emergency_stop()
-                self._transition_state(FSMState.IDLE, goal_handle)
-                return False, action, target, 'Goal canceled while waiting for target.'
-            with self.goal_lock:
-                if self.latest_goal_pose is not None:
-                    acquired_pose = self.latest_goal_pose
-                    break
-            time.sleep(0.05)
-
-        if acquired_pose is None:
-            msg = f'Timed out waiting for target "{target}" detection.'
-            self.get_logger().warn(msg)
-            self._transition_state(FSMState.FAILED, goal_handle)
-            return False, action, target, msg
-
-        # Hook placeholders for upcoming feature branches:
-        # -> Branch 2 (feat/fsm-visual-servoing): MODE_A_VISUAL_SERVOING (center u ~= 320)
-        # -> Branch 3 (feat/fsm-long-range-staging): MODE_C_LONG_RANGE_STAGING (depth > 6.0m)
-
-        # Step 2: Dispatch goal to Nav2
-        self._transition_state(FSMState.NAVIGATING, goal_handle)
-        if not self.nav2_client.wait_for_server(timeout_sec=3.0):
-            msg = 'Nav2 navigate_to_pose action server unavailable.'
-            self.get_logger().error(msg)
-            self._transition_state(FSMState.FAILED, goal_handle)
-            return False, action, target, msg
-
-        nav_goal = NavigateToPose.Goal()
-        nav_goal.pose = acquired_pose
-        send_future = self.nav2_client.send_goal_async(nav_goal)
-        while not send_future.done() and rclpy.ok():
-            time.sleep(0.05)
-
-        nav_goal_handle = send_future.result()
-        if not nav_goal_handle or not nav_goal_handle.accepted:
-            msg = 'Nav2 rejected goal pose.'
-            self.get_logger().warn(msg)
-            self._transition_state(FSMState.FAILED, goal_handle)
-            return False, action, target, msg
-
-        result_future = nav_goal_handle.get_result_async()
-        while not result_future.done() and rclpy.ok():
-            if goal_handle is not None and goal_handle.is_cancel_requested:
-                self._emergency_stop()
-                self._transition_state(FSMState.IDLE, goal_handle)
-                return False, action, target, 'Goal canceled during navigation.'
-            time.sleep(0.05)
-
         self._transition_state(FSMState.COMPLETED, goal_handle)
-        return True, action, target, f'Successfully navigated to "{target}".'
+        self._transition_state(FSMState.IDLE)
+        return True, action, target, f'Sent target "{target}" to YOLO-World.'
 
     # --- ROS 2 Action Server Callbacks ---
     def _goal_callback(self, goal_request):

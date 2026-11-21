@@ -142,11 +142,13 @@ private:
         }
         RCLCPP_INFO(this->get_logger(), "[DEBUG 7] Depth threshold checks passed. Transforming coordinates...");
 
+        double z_standoff = std::max(0.35, z_c - 0.50);
+
         geometry_msgs::msg::PointStamped camera_point;
         camera_point.header = depth_msg->header;
-        camera_point.point.x = ((u - cx_) * z_c) / fx_;
-        camera_point.point.y = ((v - cy_) * z_c) / fy_;
-        camera_point.point.z = z_c;
+        camera_point.point.x = ((u - cx_) * z_standoff) / fx_;
+        camera_point.point.y = ((v - cy_) * z_standoff) / fy_;
+        camera_point.point.z = z_standoff;
 
         geometry_msgs::msg::PointStamped odom_point;
         try {

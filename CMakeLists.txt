@@ -73,6 +73,7 @@ add_executable(target_projector_node
 
 ament_target_dependencies(target_projector_node 
   rclcpp 
+  std_msgs
   sensor_msgs 
   geometry_msgs 
   message_filters 

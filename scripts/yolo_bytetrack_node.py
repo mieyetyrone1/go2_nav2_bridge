@@ -60,7 +60,14 @@ class YoloByteTrackNode(Node):
             if getattr(self.model, 'predictor', None) is not None:
                 trackers = getattr(self.model.predictor, 'trackers', None)
                 if trackers:
-                    trackers.reset()
+                    if getattr(self.model, 'predictor', None) is not None:
+                        trackers = getattr(self.model.predictor, 'trackers', None)
+                        if isinstance(trackers, list):
+                            for t in trackers:
+                                if hasattr(t, 'reset'):
+                                    t.reset()
+                        elif hasattr(trackers, 'reset'):
+                            trackers.reset()
 
     def camera_callback(self, msg):
         try:
@@ -90,7 +97,7 @@ class YoloByteTrackNode(Node):
                     
                     bbox_msg = PolygonStamped()
                     bbox_msg.header.stamp = msg.header.stamp  
-                    bbox_msg.header.frame_id = "camera_depth_optical_frame"
+                    bbox_msg.header.frame_id = active_label
                     
                     p1 = Point32(x=float(x1), y=float(y1), z=float(assigned_id))
                     p2 = Point32(x=float(x2), y=float(y2), z=float(assigned_id))

@@ -16,6 +16,7 @@
 #include "tf2_ros/buffer.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.h"
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 class TargetProjectorNode : public rclcpp::Node
 {
@@ -39,15 +40,27 @@ public:
             "/update_yolo_vocabulary", 10,
             [this](const std_msgs::msg::String::SharedPtr msg) {
                 active_target_ = msg->data;
+                projection_enabled_ = false;
                 if (active_target_.empty()) {
-                goal_sent_ = true;
-                RCLCPP_INFO(this->get_logger(), "Vocabulary cleared. Projector locked in STANDBY.");
+                    goal_sent_ = true;
+                    RCLCPP_INFO(this->get_logger(), "Vocabulary cleared. Projector locked in STANDBY.");
                 } else {
-                goal_sent_ = false;
-                RCLCPP_INFO(
-                    this->get_logger(),
-                    "Reset projector latch for new target: '%s'", active_target_.c_str());
+                    goal_sent_ = false;
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "Reset projector latch for new target: '%s' (waiting for /projector_enable)",
+                        active_target_.c_str());
                 }
+            });
+
+        enable_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+            "/projector_enable", 10,
+            [this](const std_msgs::msg::Bool::SharedPtr msg) {
+                projection_enabled_ = msg->data;
+                RCLCPP_INFO(
+                this->get_logger(),
+                "Projector enable state updated: %s",
+                projection_enabled_ ? "ENABLED" : "GATED");
             });
         
         bbox_sub_.subscribe(this, "/tracker/tracked_target", custom_qos);
@@ -118,6 +131,13 @@ private:
                 this->get_logger(), *this->get_clock(), 1000,
                 "[DEBUG] Ignoring stale bbox for '%s' while waiting for '%s'.",
                 bbox_msg->header.frame_id.c_str(), active_target_.c_str());
+            return;
+        }
+
+        if (!projection_enabled_) {
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(), *this->get_clock(), 1000,
+                "[DEBUG] Waiting for Mode A visual servoing alignment (/projector_enable)...");
             return;
         }
 
@@ -198,6 +218,7 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goal_pub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr info_sub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr vocab_sub_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr enable_sub_;
     message_filters::Subscriber<geometry_msgs::msg::PolygonStamped> bbox_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> depth_sub_;
 
@@ -211,6 +232,7 @@ private:
     bool has_calibration_;
     bool goal_sent_; // Latch state declaration
     std::string active_target_;
+    bool projection_enabled_;
 };
 
 int main(int argc, char * argv[])

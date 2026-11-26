@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import math
+import struct
 import time
 import threading
 from typing import Optional, Tuple
@@ -13,6 +14,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import qos_profile_sensor_data
 
 from std_msgs.msg import String, Bool
+from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped, Twist, PolygonStamped
 from nav2_msgs.action import NavigateToPose
 from action_msgs.srv import CancelGoal
@@ -45,6 +47,10 @@ class CognitiveFSMNode(Node):
         self.declare_parameter('search_step_sec', 1.16)
         self.declare_parameter('search_dwell_sec', 3.0)
         self.declare_parameter('max_search_steps', 13)
+        self.declare_parameter('max_depth_range_m', 5.8)
+        self.declare_parameter('staging_linear_speed', 0.30)
+        self.declare_parameter('staging_step_sec', 2.5)
+        self.declare_parameter('max_staging_steps', 6)
 
         model_path = self.get_parameter('model_path').get_parameter_value().string_value
         n_gpu_layers = self.get_parameter('n_gpu_layers').get_parameter_value().integer_value
@@ -83,6 +89,18 @@ class CognitiveFSMNode(Node):
         self.max_search_steps = (
             self.get_parameter('max_search_steps').get_parameter_value().integer_value
         )
+        self.max_depth_range_m = (
+            self.get_parameter('max_depth_range_m').get_parameter_value().double_value
+        )
+        self.staging_linear_speed = (
+            self.get_parameter('staging_linear_speed').get_parameter_value().double_value
+        )
+        self.staging_step_sec = (
+            self.get_parameter('staging_step_sec').get_parameter_value().double_value
+        )
+        self.max_staging_steps = (
+            self.get_parameter('max_staging_steps').get_parameter_value().integer_value
+        )
 
         # Load GPU-accelerated LLM once at node startup
         self.get_logger().info(f'Loading GGUF model onto GPU from: {model_path}')
@@ -108,6 +126,7 @@ class CognitiveFSMNode(Node):
         self.latest_bbox_mono_time: float = 0.0
         self.bbox_seq: int = 0
         self.latest_goal_pose: Optional[PoseStamped] = None
+        self.latest_depth_msg: Optional = None
 
         # Publishers
         self.vocab_pub = self.create_publisher(String, '/update_yolo_vocabulary', 10)
@@ -127,6 +146,13 @@ class CognitiveFSMNode(Node):
             '/goal_pose',
             self._goal_pose_callback,
             10,
+            callback_group=self.cb_group,
+        )
+        self.depth_sub = self.create_subscription(
+            Image,
+            '/camera/depth/image_rect_raw',
+            self._depth_callback,
+            qos_profile_sensor_data,
             callback_group=self.cb_group,
         )
 
@@ -180,6 +206,10 @@ class CognitiveFSMNode(Node):
     def _goal_pose_callback(self, msg: PoseStamped):
         with self.data_lock:
             self.latest_goal_pose = msg
+
+    def _depth_callback(self, msg: Image):
+        with self.data_lock:
+            self.latest_depth_msg = msg
 
     def _publish_zero_vel(self):
         self.cmd_vel_pub.publish(Twist())
@@ -416,6 +446,117 @@ class CognitiveFSMNode(Node):
         self._publish_zero_vel()
         return False
 
+    def _measure_target_depth_m(self) -> Optional[float]:
+        """Sample median valid depth (meters) in a 5x5 patch around the latest bbox center."""
+        with self.data_lock:
+            bbox = self.latest_bbox
+            depth_msg = self.latest_depth_msg
+
+        if bbox is None or depth_msg is None or len(bbox.polygon.points) < 2:
+            return None
+
+        u_center = int((bbox.polygon.points[0].x + bbox.polygon.points[1].x) / 2.0)
+        v_center = int((bbox.polygon.points[0].y + bbox.polygon.points[1].y) / 2.0)
+        width = int(depth_msg.width)
+        height = int(depth_msg.height)
+        if not (0 <= u_center < width and 0 <= v_center < height):
+            return None
+
+        valid_depths = []
+        data = depth_msg.data
+        step = int(depth_msg.step)
+        for dv in range(-2, 3):
+            vv = v_center + dv
+            if not (0 <= vv < height):
+                continue
+            row_offset = vv * step
+            for du in range(-2, 3):
+                uu = u_center + du
+                if not (0 <= uu < width):
+                    continue
+                idx = row_offset + uu * 2
+                if idx + 2 <= len(data):
+                    raw_mm = struct.unpack_from('<H', data, idx)[0]
+                    if raw_mm > 0:
+                        valid_depths.append(raw_mm / 1000.0)
+
+        if not valid_depths:
+            return 0.0  # Explicit far-range / invalid stereo return
+        valid_depths.sort()
+        return valid_depths[len(valid_depths) // 2]
+
+    def _run_mode_c_long_range_staging(self, target: str, goal_handle=None) -> bool:
+        """Mode C: Advance in bounded forward crawls if target depth exceeds reliable RGB-D range."""
+        # Wait briefly for a synchronized depth frame
+        deadline = time.monotonic() + 2.0
+        z_m = None
+        while rclpy.ok() and time.monotonic() < deadline:
+            z_m = self._measure_target_depth_m()
+            if z_m is not None:
+                break
+            time.sleep(0.05)
+
+        if z_m is None:
+            self.get_logger().warn(
+                '[MODE C] No depth image received yet; proceeding directly to projector handoff.'
+            )
+            return True
+
+        if 0.35 < z_m <= self.max_depth_range_m:
+            self.get_logger().info(
+                f'[MODE C] Target "{target}" depth z={z_m:.2f}m is within reliable range '
+                f'(<= {self.max_depth_range_m:.2f}m). Skipping long-range staging.'
+            )
+            return True
+
+        self._transition_state(FSMState.MODE_C_LONG_RANGE_STAGING, goal_handle)
+
+        for step_idx in range(1, self.max_staging_steps + 1):
+            if self.cancel_requested or (
+                goal_handle is not None and goal_handle.is_cancel_requested
+            ):
+                self._publish_zero_vel()
+                return False
+
+            z_str = f'{z_m:.2f}m' if (z_m is not None and z_m > 0.0) else 'out-of-range (0.0m)'
+            self.get_logger().info(
+                f'[MODE C - STAGING] Step {step_idx}/{self.max_staging_steps}: '
+                f'"{target}" depth={z_str} > {self.max_depth_range_m:.2f}m. '
+                f'Advancing {self.staging_linear_speed:.2f} m/s for {self.staging_step_sec:.2f}s...'
+            )
+
+            # Bounded forward crawl (stop_on_detection=False because target is already visible)
+            if not self._execute_motion_pulse(
+                self.staging_linear_speed,
+                0.0,
+                self.staging_step_sec,
+                goal_handle,
+                stop_on_detection=False,
+            ):
+                return False
+
+            # Re-verify horizontal centering after forward advance
+            if not self._run_mode_a_visual_servoing(target, goal_handle):
+                return False
+
+            # Restore Mode C state label if multi-step staging continues
+            self._transition_state(FSMState.MODE_C_LONG_RANGE_STAGING, goal_handle)
+
+            z_m = self._measure_target_depth_m()
+            if z_m is not None and 0.35 < z_m <= self.max_depth_range_m:
+                self.get_logger().info(
+                    f'[MODE C - STAGING] Target "{target}" entered reliable depth envelope '
+                    f'(z={z_m:.2f}m <= {self.max_depth_range_m:.2f}m) after {step_idx} staging step(s)!'
+                )
+                return True
+
+        self._publish_zero_vel()
+        self.get_logger().warn(
+            f'[MODE C] Completed {self.max_staging_steps} staging steps for "{target}" '
+            f'without achieving depth <= {self.max_depth_range_m:.2f}m.'
+        )
+        return False
+
     def run_fsm_pipeline(
         self, command_text: str, goal_handle=None
     ) -> Tuple[bool, str, str, str]:
@@ -473,6 +614,14 @@ class CognitiveFSMNode(Node):
             self._transition_state(FSMState.FAILED, goal_handle)
             self._transition_state(FSMState.IDLE)
             return False, action, target, f'Failed or canceled while aligning to "{target}".'
+
+        # Execute Mode C: Long-Range Depth Staging (if target is beyond reliable RGB-D ceiling)
+        in_range = self._run_mode_c_long_range_staging(target, goal_handle)
+        if not in_range:
+            self._publish_zero_vel()
+            self._transition_state(FSMState.FAILED, goal_handle)
+            self._transition_state(FSMState.IDLE)
+            return False, action, target, f'Failed long-range depth staging for "{target}".'
 
         # Hand off to C++ Target Projector -> Nav2
         self._transition_state(FSMState.NAVIGATING, goal_handle)

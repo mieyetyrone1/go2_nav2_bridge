@@ -1,0 +1,10 @@
+cognitive_fsm_node:
+  ros__parameters:
+    # Controlled Ablation Flags (set true/false per experimental run)
+    enable_mode_a: true   # Mode A: Horizontal visual servoing centering
+    enable_mode_b: false   # Mode B: In-place oblique yaw wiggle + 360-deg active scan
+    enable_mode_c: true   # Mode C: Long-range depth staging crawls (> max_depth_range_m)
+
+    # Core Perception & Staging Thresholds
+    max_depth_range_m: 5.8
+    center_tolerance_px: 35.0

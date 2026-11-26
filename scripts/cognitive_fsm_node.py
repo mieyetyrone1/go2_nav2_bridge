@@ -40,6 +40,11 @@ class CognitiveFSMNode(Node):
         self.declare_parameter('servo_max_yaw', 0.45)
         self.declare_parameter('servo_min_yaw', 0.18)
         self.declare_parameter('bbox_stale_timeout_sec', 2.0)
+        self.declare_parameter('initial_observe_sec', 11.5)
+        self.declare_parameter('search_yaw_speed', 0.45)
+        self.declare_parameter('search_step_sec', 1.16)
+        self.declare_parameter('search_dwell_sec', 3.0)
+        self.declare_parameter('max_search_steps', 13)
 
         model_path = self.get_parameter('model_path').get_parameter_value().string_value
         n_gpu_layers = self.get_parameter('n_gpu_layers').get_parameter_value().integer_value
@@ -62,6 +67,21 @@ class CognitiveFSMNode(Node):
         )
         self.bbox_stale_timeout_sec = (
             self.get_parameter('bbox_stale_timeout_sec').get_parameter_value().double_value
+        )
+        self.initial_observe_sec = (
+            self.get_parameter('initial_observe_sec').get_parameter_value().double_value
+        )
+        self.search_yaw_speed = (
+            self.get_parameter('search_yaw_speed').get_parameter_value().double_value
+        )
+        self.search_step_sec = (
+            self.get_parameter('search_step_sec').get_parameter_value().double_value
+        )
+        self.search_dwell_sec = (
+            self.get_parameter('search_dwell_sec').get_parameter_value().double_value
+        )
+        self.max_search_steps = (
+            self.get_parameter('max_search_steps').get_parameter_value().integer_value
         )
 
         # Load GPU-accelerated LLM once at node startup
@@ -199,6 +219,105 @@ class CognitiveFSMNode(Node):
             target=self.run_fsm_pipeline, args=(msg.data, None), daemon=True
         ).start()
 
+    def _wait_for_detection(self, timeout_sec: float, goal_handle=None) -> bool:
+        """Wait up to timeout_sec for any matching bounding box (bbox_seq > 0)."""
+        deadline = time.monotonic() + timeout_sec
+        while rclpy.ok() and time.monotonic() < deadline:
+            if self.cancel_requested or (
+                goal_handle is not None and goal_handle.is_cancel_requested
+            ):
+                return False
+            with self.data_lock:
+                if self.bbox_seq > 0 and self.latest_bbox is not None:
+                    return True
+            time.sleep(0.05)
+        with self.data_lock:
+            return self.bbox_seq > 0 and self.latest_bbox is not None
+
+    def _execute_motion_pulse(
+        self,
+        lin_x: float,
+        ang_z: float,
+        duration_sec: float,
+        goal_handle=None,
+        stop_on_detection: bool = True,
+    ) -> bool:
+        """Publish a bounded differential-drive Twist pulse while respecting cancels/detections."""
+        twist = Twist()
+        twist.linear.x = lin_x
+        twist.angular.z = ang_z
+        pulse_end = time.monotonic() + duration_sec
+        while rclpy.ok() and time.monotonic() < pulse_end:
+            if self.cancel_requested or (
+                goal_handle is not None and goal_handle.is_cancel_requested
+            ):
+                self._publish_zero_vel()
+                return False
+            if stop_on_detection:
+                with self.data_lock:
+                    if self.bbox_seq > 0 and self.latest_bbox is not None:
+                        self._publish_zero_vel()
+                        time.sleep(0.25)
+                        return True
+            self.cmd_vel_pub.publish(twist)
+            time.sleep(0.05)
+        self._publish_zero_vel()
+        time.sleep(0.35)  # Allow chassis to settle before inference
+        return True
+
+    def _run_mode_b_active_perception(self, target: str, goal_handle=None) -> bool:
+        """Mode B: Pure in-place yaw oscillations (+20 -> -40 deg) followed by 360-deg scan."""
+        if self._wait_for_detection(self.initial_observe_sec, goal_handle):
+            self.get_logger().info(
+                f'[MODE B] Target "{target}" already visible in initial FOV. Skipping active perception.'
+            )
+            return True
+
+        self._transition_state(FSMState.MODE_B_ACTIVE_PERCEPTION, goal_handle)
+
+        # Stage B1: Pure in-place forward yaw oscillations (+20 deg left -> -40 deg right)
+        yaw_glances = [
+            ("+20 deg left glance", self.search_yaw_speed, 0.78),
+            ("-40 deg right glance", -self.search_yaw_speed, 1.55),
+        ]
+
+        for label, wz, dur in yaw_glances:
+            self.get_logger().info(
+                f'[MODE B - WIGGLE] Executing {label} (in-place) for "{target}"...'
+            )
+            if not self._execute_motion_pulse(0.0, wz, dur, goal_handle):
+                return False
+            if self._wait_for_detection(self.search_dwell_sec, goal_handle):
+                self.get_logger().info(
+                    f'[MODE B - WIGGLE] Acquired "{target}" during {label}! Handing off to Mode A.'
+                )
+                return True
+
+        # Stage B2: Pure in-place 360-deg step-and-scan (~30 deg per step)
+        self.get_logger().info(
+            f'[MODE B - SCAN] Forward glances did not reveal "{target}". '
+            f'Starting in-place 360-deg step-and-scan ({self.max_search_steps} steps)...'
+        )
+        for step_idx in range(1, self.max_search_steps + 1):
+            self.get_logger().info(
+                f'[MODE B - SCAN] Step {step_idx}/{self.max_search_steps} for "{target}"...'
+            )
+            if not self._execute_motion_pulse(
+                0.0, self.search_yaw_speed, self.search_step_sec, goal_handle
+            ):
+                return False
+            if self._wait_for_detection(self.search_dwell_sec, goal_handle):
+                self.get_logger().info(
+                    f'[MODE B - SCAN] Acquired "{target}" on step {step_idx}! Handing off to Mode A.'
+                )
+                return True
+
+        self._publish_zero_vel()
+        self.get_logger().warn(
+            f'[MODE B] Completed in-place yaw wiggle and 360-deg scan without detecting "{target}".'
+        )
+        return False
+
     def _run_mode_a_visual_servoing(self, target: str, goal_handle=None) -> bool:
         """Mode A: Step-and-settle horizontal centering matched to ~1.5s YOLO inference rate."""
         self._transition_state(FSMState.MODE_A_VISUAL_SERVOING, goal_handle)
@@ -206,6 +325,9 @@ class CognitiveFSMNode(Node):
         start_time = time.monotonic()
         last_log_time = 0.0
         last_processed_seq = 0
+        last_fresh_time = time.monotonic()
+        last_err_x = float('inf')
+
 
         while rclpy.ok():
             if self.cancel_requested or (
@@ -228,6 +350,18 @@ class CognitiveFSMNode(Node):
 
             # Wait strictly for a NEW detection frame after each step settles
             if bbox is None or seq == last_processed_seq:
+                if (
+                    last_processed_seq > 0
+                    and abs(last_err_x) <= self.center_tolerance_px
+                    and (now - last_fresh_time) > 4.5
+                    and bbox is not None
+                ):
+                    self._publish_zero_vel()
+                    self.get_logger().warn(
+                        f'[MODE A] Detection flickered for >4.5s after centering; '
+                        f'proceeding with last centered "{target}" detection!'
+                    )
+                    return True
                 if (now - last_log_time) > 2.0:
                     self.get_logger().info(
                         f'[MODE A] Waiting for next fresh "{target}" detection...'
@@ -237,10 +371,12 @@ class CognitiveFSMNode(Node):
                 continue
 
             last_processed_seq = seq
+            last_fresh_time = now
             x_min = bbox.polygon.points[0].x
             x_max = bbox.polygon.points[1].x
             u_target = (x_min + x_max) / 2.0
             err_x = u_center_ref - u_target  # +err_x => target is left => +angular.z (CCW)
+            last_err_x = err_x
 
             if abs(err_x) <= self.center_tolerance_px:
                 self._publish_zero_vel()
@@ -321,6 +457,14 @@ class CognitiveFSMNode(Node):
         vocab_msg.data = target
         self.vocab_pub.publish(vocab_msg)
         self.get_logger().info(f'Published target vocabulary to YOLO-World: "{target}"')
+
+        # Execute Mode B: Active Viewpoint Perspective Shift + 360-deg Search Scan
+        found = self._run_mode_b_active_perception(target, goal_handle)
+        if not found:
+            self._publish_zero_vel()
+            self._transition_state(FSMState.FAILED, goal_handle)
+            self._transition_state(FSMState.IDLE)
+            return False, action, target, f'Could not find "{target}" during active perception.'
 
         # Execute Mode A: Horizontal Visual Servoing Alignment
         aligned = self._run_mode_a_visual_servoing(target, goal_handle)

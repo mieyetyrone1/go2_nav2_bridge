@@ -42,9 +42,9 @@ class CognitiveFSMNode(Node):
         self.declare_parameter('bbox_stale_timeout_sec', 2.0)
         self.declare_parameter('initial_observe_sec', 11.5)
         self.declare_parameter('search_yaw_speed', 0.45)
-        self.declare_parameter('search_step_sec', 1.35)
-        self.declare_parameter('search_dwell_sec', 2.2)
-        self.declare_parameter('max_search_steps', 11)
+        self.declare_parameter('search_step_sec', 1.16)
+        self.declare_parameter('search_dwell_sec', 3.0)
+        self.declare_parameter('max_search_steps', 13)
 
         model_path = self.get_parameter('model_path').get_parameter_value().string_value
         n_gpu_layers = self.get_parameter('n_gpu_layers').get_parameter_value().integer_value
@@ -266,7 +266,7 @@ class CognitiveFSMNode(Node):
         return True
 
     def _run_mode_b_active_perception(self, target: str, goal_handle=None) -> bool:
-        """Mode B: Differential-drive perspective arc shifts followed by 360-deg scan."""
+        """Mode B: Pure in-place yaw oscillations (+20 -> -40 deg) followed by 360-deg scan."""
         if self._wait_for_detection(self.initial_observe_sec, goal_handle):
             self.get_logger().info(
                 f'[MODE B] Target "{target}" already visible in initial FOV. Skipping active perception.'
@@ -275,49 +275,28 @@ class CognitiveFSMNode(Node):
 
         self._transition_state(FSMState.MODE_B_ACTIVE_PERCEPTION, goal_handle)
 
-        # Stage B1: Differential-drive oblique perspective shifts (yaw -> advance -> re-aim)
-        perspective_arcs = [
-            (
-                "left oblique viewpoint",
-                [
-                    (0.0, 0.45, 1.35),   # Turn ~35 deg left
-                    (0.25, 0.0, 1.60),   # Advance ~0.40m laterally
-                    (0.0, -0.45, 1.75),  # Re-aim ~45 deg right toward workspace center
-                ],
-            ),
-            (
-                "right oblique viewpoint",
-                [
-                    (0.0, -0.45, 2.50),  # Turn ~65 deg right across center
-                    (0.25, 0.0, 2.40),   # Advance ~0.60m to opposite flank
-                    (0.0, 0.45, 1.75),   # Re-aim ~45 deg left toward workspace center
-                ],
-            ),
+        # Stage B1: Pure in-place forward yaw oscillations (+20 deg left -> -40 deg right)
+        yaw_glances = [
+            ("+20 deg left glance", self.search_yaw_speed, 0.78),
+            ("-40 deg right glance", -self.search_yaw_speed, 1.55),
         ]
 
-        for label, segments in perspective_arcs:
+        for label, wz, dur in yaw_glances:
             self.get_logger().info(
-                f'[MODE B - VIEWPOINT] Maneuvering to {label} to alter perspective for "{target}"...'
+                f'[MODE B - WIGGLE] Executing {label} (in-place) for "{target}"...'
             )
-            for vx, wz, dur in segments:
-                if not self._execute_motion_pulse(vx, wz, dur, goal_handle):
-                    return False
-                if self._wait_for_detection(0.1, goal_handle):
-                    self.get_logger().info(
-                        f'[MODE B - VIEWPOINT] Acquired "{target}" during {label}! Handing off to Mode A.'
-                    )
-                    return True
-
+            if not self._execute_motion_pulse(0.0, wz, dur, goal_handle):
+                return False
             if self._wait_for_detection(self.search_dwell_sec, goal_handle):
                 self.get_logger().info(
-                    f'[MODE B - VIEWPOINT] Acquired "{target}" from {label}! Handing off to Mode A.'
+                    f'[MODE B - WIGGLE] Acquired "{target}" during {label}! Handing off to Mode A.'
                 )
                 return True
 
-        # Stage B2: Fallback to 360-deg step-and-scan if target is outside forward FOV
+        # Stage B2: Pure in-place 360-deg step-and-scan (~30 deg per step)
         self.get_logger().info(
-            f'[MODE B - SCAN] Viewpoint arcs did not reveal "{target}". '
-            f'Starting 360-deg step-and-scan ({self.max_search_steps} steps)...'
+            f'[MODE B - SCAN] Forward glances did not reveal "{target}". '
+            f'Starting in-place 360-deg step-and-scan ({self.max_search_steps} steps)...'
         )
         for step_idx in range(1, self.max_search_steps + 1):
             self.get_logger().info(
@@ -335,7 +314,7 @@ class CognitiveFSMNode(Node):
 
         self._publish_zero_vel()
         self.get_logger().warn(
-            f'[MODE B] Completed viewpoint arcs and 360-deg scan without detecting "{target}".'
+            f'[MODE B] Completed in-place yaw wiggle and 360-deg scan without detecting "{target}".'
         )
         return False
 
@@ -347,6 +326,8 @@ class CognitiveFSMNode(Node):
         last_log_time = 0.0
         last_processed_seq = 0
         last_fresh_time = time.monotonic()
+        last_err_x = float('inf')
+
 
         while rclpy.ok():
             if self.cancel_requested or (
@@ -369,11 +350,16 @@ class CognitiveFSMNode(Node):
 
             # Wait strictly for a NEW detection frame after each step settles
             if bbox is None or seq == last_processed_seq:
-                if last_processed_seq > 0 and (now - last_fresh_time) > 4.5 and bbox is not None:
+                if (
+                    last_processed_seq > 0
+                    and abs(last_err_x) <= self.center_tolerance_px
+                    and (now - last_fresh_time) > 4.5
+                    and bbox is not None
+                ):
                     self._publish_zero_vel()
                     self.get_logger().warn(
-                        f'[MODE A] Detection flickered for >4.5s after alignment; '
-                        f'proceeding with last aligned "{target}" detection!'
+                        f'[MODE A] Detection flickered for >4.5s after centering; '
+                        f'proceeding with last centered "{target}" detection!'
                     )
                     return True
                 if (now - last_log_time) > 2.0:
@@ -390,6 +376,7 @@ class CognitiveFSMNode(Node):
             x_max = bbox.polygon.points[1].x
             u_target = (x_min + x_max) / 2.0
             err_x = u_center_ref - u_target  # +err_x => target is left => +angular.z (CCW)
+            last_err_x = err_x
 
             if abs(err_x) <= self.center_tolerance_px:
                 self._publish_zero_vel()

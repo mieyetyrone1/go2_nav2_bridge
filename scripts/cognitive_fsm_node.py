@@ -4,6 +4,9 @@ import math
 import struct
 import time
 import threading
+import os
+import yaml
+from ament_index_python.packages import get_package_share_directory
 from typing import Optional, Tuple
 
 import rclpy
@@ -28,6 +31,29 @@ class CognitiveFSMNode(Node):
     def __init__(self):
         super().__init__('cognitive_fsm_node')
 
+        # Load default ablation flags from installed config/fsm_ablation.yaml
+        yaml_defaults = {
+            'enable_mode_a': True,
+            'enable_mode_b': True,
+            'enable_mode_c': True,
+        }
+        try:
+            cfg_path = os.path.join(
+                get_package_share_directory('go2_nav2_bridge'),
+                'config',
+                'fsm_ablation.yaml',
+            )
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r') as f:
+                    data = yaml.safe_load(f) or {}
+                params = data.get('cognitive_fsm_node', {}).get('ros__parameters', {})
+                for key in yaml_defaults:
+                    if key in params:
+                        yaml_defaults[key] = bool(params[key])
+                self.get_logger().info(f'Loaded ablation config from: {cfg_path}')
+        except Exception as exc:
+            self.get_logger().warn(f'Could not read fsm_ablation.yaml ({exc}); using defaults.')
+
         # Parameters
         self.declare_parameter(
             'model_path',
@@ -51,6 +77,10 @@ class CognitiveFSMNode(Node):
         self.declare_parameter('staging_linear_speed', 0.30)
         self.declare_parameter('staging_step_sec', 2.5)
         self.declare_parameter('max_staging_steps', 6)
+        self.declare_parameter('enable_mode_a', yaml_defaults['enable_mode_a'])
+        self.declare_parameter('enable_mode_b', yaml_defaults['enable_mode_b'])
+        self.declare_parameter('enable_mode_c', yaml_defaults['enable_mode_c'])
+
 
         model_path = self.get_parameter('model_path').get_parameter_value().string_value
         n_gpu_layers = self.get_parameter('n_gpu_layers').get_parameter_value().integer_value
@@ -100,6 +130,19 @@ class CognitiveFSMNode(Node):
         )
         self.max_staging_steps = (
             self.get_parameter('max_staging_steps').get_parameter_value().integer_value
+        )
+        self.enable_mode_a = (
+            self.get_parameter('enable_mode_a').get_parameter_value().bool_value
+        )
+        self.enable_mode_b = (
+            self.get_parameter('enable_mode_b').get_parameter_value().bool_value
+        )
+        self.enable_mode_c = (
+            self.get_parameter('enable_mode_c').get_parameter_value().bool_value
+        )
+        self.get_logger().info(
+            f'Ablation Mode Gates -> Mode A: {self.enable_mode_a}, '
+            f'Mode B: {self.enable_mode_b}, Mode C: {self.enable_mode_c}'
         )
 
         # Load GPU-accelerated LLM once at node startup
@@ -535,9 +578,10 @@ class CognitiveFSMNode(Node):
             ):
                 return False
 
-            # Re-verify horizontal centering after forward advance
-            if not self._run_mode_a_visual_servoing(target, goal_handle):
-                return False
+            # Re-verify horizontal centering after forward advance (if Mode A is enabled)
+            if self.enable_mode_a:
+                if not self._run_mode_a_visual_servoing(target, goal_handle):
+                    return False
 
             # Restore Mode C state label if multi-step staging continues
             self._transition_state(FSMState.MODE_C_LONG_RANGE_STAGING, goal_handle)
@@ -599,8 +643,15 @@ class CognitiveFSMNode(Node):
         self.vocab_pub.publish(vocab_msg)
         self.get_logger().info(f'Published target vocabulary to YOLO-World: "{target}"')
 
-        # Execute Mode B: Active Viewpoint Perspective Shift + 360-deg Search Scan
-        found = self._run_mode_b_active_perception(target, goal_handle)
+        # Execute Mode B: In-Place Active Perception (or passive observe if disabled)
+        if self.enable_mode_b:
+            found = self._run_mode_b_active_perception(target, goal_handle)
+        else:
+            self.get_logger().info(
+                f'[MODE B] Disabled via parameter; observing passively up to {self.initial_observe_sec:.1f}s.'
+            )
+            found = self._wait_for_detection(self.initial_observe_sec, goal_handle)
+
         if not found:
             self._publish_zero_vel()
             self._transition_state(FSMState.FAILED, goal_handle)
@@ -608,20 +659,26 @@ class CognitiveFSMNode(Node):
             return False, action, target, f'Could not find "{target}" during active perception.'
 
         # Execute Mode A: Horizontal Visual Servoing Alignment
-        aligned = self._run_mode_a_visual_servoing(target, goal_handle)
-        if not aligned:
-            self._publish_zero_vel()
-            self._transition_state(FSMState.FAILED, goal_handle)
-            self._transition_state(FSMState.IDLE)
-            return False, action, target, f'Failed or canceled while aligning to "{target}".'
+        if self.enable_mode_a:
+            aligned = self._run_mode_a_visual_servoing(target, goal_handle)
+            if not aligned:
+                self._publish_zero_vel()
+                self._transition_state(FSMState.FAILED, goal_handle)
+                self._transition_state(FSMState.IDLE)
+                return False, action, target, f'Failed or canceled while aligning to "{target}".'
+        else:
+            self.get_logger().info('[MODE A] Disabled via parameter; skipping horizontal centering.')
 
         # Execute Mode C: Long-Range Depth Staging (if target is beyond reliable RGB-D ceiling)
-        in_range = self._run_mode_c_long_range_staging(target, goal_handle)
-        if not in_range:
-            self._publish_zero_vel()
-            self._transition_state(FSMState.FAILED, goal_handle)
-            self._transition_state(FSMState.IDLE)
-            return False, action, target, f'Failed long-range depth staging for "{target}".'
+        if self.enable_mode_c:
+            in_range = self._run_mode_c_long_range_staging(target, goal_handle)
+            if not in_range:
+                self._publish_zero_vel()
+                self._transition_state(FSMState.FAILED, goal_handle)
+                self._transition_state(FSMState.IDLE)
+                return False, action, target, f'Failed long-range depth staging for "{target}".'
+        else:
+            self.get_logger().info('[MODE C] Disabled via parameter; skipping long-range depth staging.')
 
         # Hand off to C++ Target Projector -> Nav2
         self._transition_state(FSMState.NAVIGATING, goal_handle)
